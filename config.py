@@ -95,12 +95,13 @@ class FeatureConfig:
 # ── 학습 설정 ──────────────────────────────────────────
 @dataclass
 class TrainConfig:
-    total_timesteps: int    = 200_000
-    eval_interval: int      = 5_000
-    eval_episodes: int      = 3
-    save_interval: int      = 10_000
-    log_interval: int       = 1_000
-    seed: int               = 42
+    total_timesteps: int         = 200_000
+    eval_interval: int           = 5_000
+    eval_episodes: int           = 3
+    save_interval: int           = 10_000
+    log_interval: int            = 1_000
+    seed: int                    = 42
+    early_stopping_patience: int = 10   # eval 횟수 기준, 0=비활성화
 
 
 env_cfg     = EnvConfig()

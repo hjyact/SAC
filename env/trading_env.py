@@ -50,6 +50,7 @@ class TradingEnv(gym.Env):
         price_df: pd.DataFrame,
         cfg: EnvConfig = env_cfg,
         mode: str = "train",   # "train" | "eval"
+        norm_stats: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ):
         """
         Parameters
@@ -72,9 +73,12 @@ class TradingEnv(gym.Env):
         self.n_steps  = len(self.features)
         self.n_feat   = self.features.shape[1]
 
-        # 피처 정규화 통계 (훈련 데이터 기준, look-ahead 없음)
-        self._feat_mean = np.nanmean(self.features, axis=0)
-        self._feat_std  = np.nanstd(self.features, axis=0) + 1e-8
+        # 피처 정규화 통계: 외부 주입(훈련 env 기준)이 없으면 자체 계산
+        if norm_stats is not None:
+            self._feat_mean, self._feat_std = norm_stats
+        else:
+            self._feat_mean = np.nanmean(self.features, axis=0)
+            self._feat_std  = np.nanstd(self.features, axis=0) + 1e-8
 
         # 공간 정의
         obs_dim = cfg.window_size * self.n_feat + 4   # 4 = 포트폴리오 상태
@@ -91,6 +95,11 @@ class TradingEnv(gym.Env):
 
         # 보상 계산용 히스토리 버퍼
         self._ret_history: list = []
+
+    @property
+    def norm_stats(self) -> Tuple[np.ndarray, np.ndarray]:
+        """훈련 데이터 기반 정규화 통계 (eval env에 주입용)."""
+        return (self._feat_mean.copy(), self._feat_std.copy())
 
     # ── 리셋 ──────────────────────────────────────────
 
@@ -112,6 +121,7 @@ class TradingEnv(gym.Env):
 
         self._step_idx = self._start
         self._end      = min(self._start + self.cfg.episode_length, self.n_steps - 1)
+        self._episode_start_price = float(self.prices.iloc[self._start]["Close"])
 
         obs = self._get_obs()
         return obs, {}
@@ -129,6 +139,7 @@ class TradingEnv(gym.Env):
         self.peak_capital = self.cfg.initial_capital
         self._ret_history = []
         self._trade_count = 0
+        self._episode_start_price = 0.0
 
     # ── 스텝 ──────────────────────────────────────────
 

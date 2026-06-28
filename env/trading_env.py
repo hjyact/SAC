@@ -184,16 +184,16 @@ class TradingEnv(gym.Env):
         price_ret  = (next_close - cur_close) / (cur_close + 1e-9)
 
         # 포지션 수익 (롱: 상승 이익, 숏: 하락 이익)
-        position_pnl = self.position * price_ret * self.capital
-        self.capital  = max(self.capital + position_pnl - trade_cost, 1.0)
+        pre_capital  = self.capital                          # PnL 계산 전 자본 저장
+        position_pnl = self.position * price_ret * pre_capital
+        self.capital  = max(pre_capital + position_pnl - trade_cost, 1.0)
         self.holdings = self.capital * abs(self.position)
 
         # 최고점 업데이트 (MDD 계산용)
         self.peak_capital = max(self.peak_capital, self.capital)
 
-        # 보상 계산
-        # step_ret: 현재 자본 대비 수익률 (복리 기준, 단위 정규화)
-        step_ret = position_pnl / (self.capital + 1e-9)
+        # step_ret: 업데이트 전 자본 대비 수익률 (올바른 분모)
+        step_ret = position_pnl / (pre_capital + 1e-9)
         self._ret_history.append(step_ret)
         reward = self._compute_reward(step_ret, trade_cost)
 
@@ -317,6 +317,11 @@ class TradingEnv(gym.Env):
             "trade_count": self._trade_count,
             "cur_price":  cur_price,
         }
+
+    def get_buyhold_return(self) -> float:
+        """현재 에피소드 기간의 단순 매수보유 수익률."""
+        cur_price = float(self.prices.iloc[self._step_idx]["Close"])
+        return (cur_price - self._episode_start_price) / (self._episode_start_price + 1e-9)
 
     # ── 렌더링 ─────────────────────────────────────────
 

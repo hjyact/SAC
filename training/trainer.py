@@ -50,9 +50,10 @@ class SACTrainer:
         self._loss_history: List[Dict] = []
         self._eval_history: List[Dict] = []
 
-        self._best_eval_score = -np.inf
-        self._timestep        = 0
-        self._episode         = 0
+        self._best_eval_score  = -np.inf
+        self._patience_counter = 0
+        self._timestep         = 0
+        self._episode          = 0
 
     # ── 메인 학습 루프 ─────────────────────────────────
 
@@ -135,9 +136,11 @@ class SACTrainer:
                 eval_result["step"] = t
                 self._eval_history.append(eval_result)
 
+                bh = eval_result.get("buyhold_return", 0.0)
                 logger.info(
                     f"  ── EVAL ── "
                     f"TotalRet={eval_result['total_return']:+.2%} | "
+                    f"B&H={bh:+.2%} | "
                     f"Sharpe={eval_result['sharpe']:.3f} | "
                     f"Sortino={eval_result.get('sortino', 0):.3f} | "
                     f"MDD={eval_result['mdd']:.2%} | "
@@ -145,12 +148,22 @@ class SACTrainer:
                     f"Trades={eval_result['mean_trades']:.0f}"
                 )
 
-                # 최고 모델 저장
+                # 최고 모델 저장 + early stopping
                 score = eval_result["sharpe"]
                 if score > self._best_eval_score:
-                    self._best_eval_score = score
+                    self._best_eval_score  = score
+                    self._patience_counter = 0
                     self.agent.save("best_sac")
                     logger.info(f"  ✅ 최고 모델 저장 (Sharpe={score:.4f})")
+                else:
+                    self._patience_counter += 1
+                    patience = self.cfg.early_stopping_patience
+                    if patience > 0 and self._patience_counter >= patience:
+                        logger.info(
+                            f"  ⏹ Early stopping: {patience}회 연속 개선 없음 "
+                            f"(최고 Sharpe={self._best_eval_score:.4f})"
+                        )
+                        break
 
             # ── 주기적 저장
             if t % self.cfg.save_interval == 0:
@@ -170,6 +183,7 @@ class SACTrainer:
         ep_capitals   = []
         ep_mdds       = []
         ep_trades     = []
+        ep_bh_rets    = []
 
         for ep in range(self.cfg.eval_episodes):
             obs, _ = self.eval_env.reset()
@@ -186,6 +200,7 @@ class SACTrainer:
             ep_capitals.append(info["capital"])
             ep_mdds.append(info["mdd"])
             ep_trades.append(info["trade_count"])
+            ep_bh_rets.append(self.eval_env.get_buyhold_return())
 
         # 에피소드 평균 총 수익률
         init = self.eval_env.cfg.initial_capital
@@ -202,13 +217,14 @@ class SACTrainer:
         sortino     = (rets.mean() / down_std) * np.sqrt(252) if len(rets) > 1 else 0.0
 
         return {
-            "mean_return":  float(rets.mean()),   # 일평균 수익률
-            "total_return": float(total_return),
-            "sharpe":       float(sharpe),
-            "sortino":      float(sortino),
-            "mdd":          float(np.mean(ep_mdds)),
-            "mean_trades":  float(np.mean(ep_trades)),
-            "win_rate":     float((rets > 0).mean()),
+            "mean_return":    float(rets.mean()),
+            "total_return":   float(total_return),
+            "sharpe":         float(sharpe),
+            "sortino":        float(sortino),
+            "mdd":            float(np.mean(ep_mdds)),
+            "mean_trades":    float(np.mean(ep_trades)),
+            "win_rate":       float((rets > 0).mean()),
+            "buyhold_return": float(np.mean(ep_bh_rets)),
         }
 
     # ── 결과 저장 ──────────────────────────────────────

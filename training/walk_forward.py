@@ -95,7 +95,8 @@ class WalkForwardTrainer:
             )
 
             train_env = TradingEnv(tr_feat,  tr_price,  env_cfg, "train")
-            val_env   = TradingEnv(val_feat, val_price, env_cfg, "eval")
+            val_env   = TradingEnv(val_feat, val_price, env_cfg, "eval",
+                                   norm_stats=train_env.norm_stats)
 
             obs_dim = train_env.observation_space.shape[0]
             act_dim = train_env.action_space.shape[0]

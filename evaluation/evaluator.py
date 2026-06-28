@@ -142,6 +142,7 @@ def run_evaluation(
     all_positions  = []
     all_step_rets  = []
     all_actions    = []
+    all_prices     = []   # buy-and-hold 계산용
 
     for ep in range(n_episodes):
         obs, _   = eval_env.reset()
@@ -150,6 +151,7 @@ def run_evaluation(
         ep_pos   = []
         ep_rets  = []
         ep_acts  = []
+        ep_prices = [float(eval_env.prices.iloc[eval_env._step_idx]["Close"])]
 
         while not done:
             action = agent.select_action(obs, deterministic=deterministic)
@@ -160,17 +162,22 @@ def run_evaluation(
             ep_pos.append(info["position"])
             ep_rets.append(info["step_ret"])
             ep_acts.append(float(action[0]))
+            ep_prices.append(info["cur_price"])
 
         all_capitals.append(ep_caps)
         all_positions.append(ep_pos)
         all_step_rets.extend(ep_rets)
         all_actions.extend(ep_acts)
+        all_prices.append(ep_prices)
 
     # 첫 에피소드 기준으로 equity curve 구성
-    equity = pd.Series(
-        all_capitals[0],
-        name="equity",
-    )
+    equity = pd.Series(all_capitals[0], name="equity")
+
+    # buy-and-hold 벤치마크 (첫 에피소드 가격 기준)
+    prices     = np.array(all_prices[0])
+    init_cap   = eval_env.cfg.initial_capital
+    benchmark  = pd.Series(init_cap * prices / prices[0], name="buyhold")
+    bh_return  = (prices[-1] / prices[0]) - 1
 
     step_rets = np.array(all_step_rets)
     metrics   = compute_metrics(equity, step_rets)
@@ -179,6 +186,7 @@ def run_evaluation(
     logger.info(f"평가 결과 — {name}")
     logger.info(f"{'='*55}")
     logger.info(f"  총 수익률   : {metrics['total_return']:>+10.2%}")
+    logger.info(f"  매수보유    : {bh_return:>+10.2%}")
     logger.info(f"  CAGR        : {metrics['cagr']:>+10.2%}")
     logger.info(f"  Sharpe      : {metrics['sharpe']:>10.3f}")
     logger.info(f"  Sortino     : {metrics['sortino']:>10.3f}")
@@ -191,6 +199,7 @@ def run_evaluation(
     return {
         "metrics":   metrics,
         "equity":    equity,
+        "benchmark": benchmark,
         "positions": all_positions[0] if all_positions else [],
         "returns":   step_rets,
         "actions":   all_actions,
@@ -248,6 +257,10 @@ def plot_backtest(eval_result: Dict, benchmark: Optional[pd.Series] = None,
     rets      = eval_result["returns"]
     metrics   = eval_result["metrics"]
 
+    # eval_result에 벤치마크가 있으면 자동 사용
+    if benchmark is None:
+        benchmark = eval_result.get("benchmark")
+
     fig = plt.figure(figsize=(16, 12))
     gs  = gridspec.GridSpec(3, 2, figure=fig, hspace=0.4, wspace=0.3)
 
@@ -300,9 +313,14 @@ def plot_backtest(eval_result: Dict, benchmark: Optional[pd.Series] = None,
     # ⑤ 성과 테이블
     ax5 = fig.add_subplot(gs[2, 1])
     ax5.axis("off")
+    bh_str = ""
+    if benchmark is not None and len(benchmark) > 1:
+        bh_ret = (benchmark.iloc[-1] / benchmark.iloc[0]) - 1
+        bh_str = f"{bh_ret:+.2%}"
     table_data = [
         ["지표",                 "값"],
         ["총 수익률",            f"{metrics['total_return']:+.2%}"],
+        ["매수보유",             bh_str],
         ["CAGR",                 f"{metrics['cagr']:+.2%}"],
         ["Sharpe Ratio",         f"{metrics['sharpe']:.3f}"],
         ["Sortino Ratio",        f"{metrics['sortino']:.3f}"],

@@ -55,9 +55,11 @@ def prepare_data(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     데이터 로드 → 피처 생성 → 훈련/테스트 분리.
     시간 순서 유지, look-ahead bias 없음.
     """
-    if args.use_synthetic or args.ticker is None:
+    if args.use_synthetic or (args.ticker is None and not args.crypto):
         logger.info("합성 데이터 생성 중...")
         price_df = _make_synthetic_data(n=2000, seed=42)
+    elif args.crypto:
+        price_df = _load_crypto_data(args)
     else:
         try:
             import yfinance as yf
@@ -131,6 +133,56 @@ def _make_synthetic_data(n: int = 2000, seed: int = 42) -> pd.DataFrame:
     }, index=dates)
 
 
+def _load_crypto_data(args) -> pd.DataFrame:
+    """
+    ccxt로 암호화폐 OHLCV 데이터를 로드합니다.
+    Binance 기준 최대 1,000봉 × 페이지네이션으로 전체 기간 수집.
+    """
+    try:
+        import ccxt
+    except ImportError:
+        logger.error("ccxt 미설치: pip install ccxt")
+        raise
+
+    exchange_cls = getattr(ccxt, args.exchange, None)
+    if exchange_cls is None:
+        raise ValueError(f"지원하지 않는 거래소: {args.exchange}")
+
+    exchange = exchange_cls({"enableRateLimit": True})
+    symbol    = args.symbol
+    timeframe = args.timeframe
+    limit     = args.crypto_limit
+
+    logger.info(f"암호화폐 데이터 수집: {exchange.id} | {symbol} | {timeframe} | {limit}봉")
+
+    # 페이지네이션으로 전체 요청
+    all_ohlcv = []
+    since     = None
+    batch     = 1000
+
+    while len(all_ohlcv) < limit:
+        fetch_n = min(batch, limit - len(all_ohlcv))
+        ohlcv   = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=fetch_n)
+        if not ohlcv:
+            break
+        all_ohlcv.extend(ohlcv)
+        since = ohlcv[-1][0] + 1   # 마지막 타임스탬프 다음부터
+        if len(ohlcv) < fetch_n:   # 더 이상 데이터 없음
+            break
+
+    if not all_ohlcv:
+        raise ValueError("암호화폐 데이터 수집 실패 (빈 응답)")
+
+    df = pd.DataFrame(all_ohlcv, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True).dt.tz_localize(None)
+    df.set_index("timestamp", inplace=True)
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+
+    logger.info(f"수집 완료: {len(df)}봉 | {df.index[0]} ~ {df.index[-1]}")
+    return df
+
+
 # ── 환경 및 에이전트 구축 ──────────────────────────────
 
 def build_env_and_agent(
@@ -146,6 +198,12 @@ def build_env_and_agent(
     env_cfg.reward_type     = args.reward
     env_cfg.episode_length  = args.episode_length
     env_cfg.window_size     = args.window_size
+
+    # 크립토 수수료: 바이낸스 taker 0.1% (주식 0.015%보다 높음)
+    if getattr(args, "crypto", False):
+        env_cfg.commission = 0.001
+        env_cfg.slippage   = 0.0005
+        logger.info("크립토 수수료 적용: commission=0.1%, slippage=0.05%")
 
     train_env = TradingEnv(train_feat, train_price, env_cfg, mode="train")
     eval_env  = TradingEnv(test_feat,  test_price,  env_cfg, mode="eval",
@@ -167,6 +225,7 @@ def build_env_and_agent(
 # ── 학습 ──────────────────────────────────────────────
 
 def run_training(args):
+    _apply_timeframe_defaults(args)
     train_data, test_data = prepare_data(args)
     train_env, eval_env, agent, buffer = build_env_and_agent(train_data, test_data, args)
 
@@ -202,6 +261,7 @@ def run_training(args):
 # ── 평가만 실행 ────────────────────────────────────────
 
 def run_eval_only(args):
+    _apply_timeframe_defaults(args)
     train_data, test_data = prepare_data(args)
     train_env, eval_env, agent, buffer = build_env_and_agent(train_data, test_data, args)
 
@@ -214,6 +274,25 @@ def run_eval_only(args):
         plot_backtest(result, name=args.load, save=True)
 
     return result
+
+
+# ── 타임프레임별 episode_length 자동 설정 ─────────────
+
+_EPISODE_BY_TIMEFRAME = {
+    "1d": 252, "1D": 252,
+    "4h": 180, "8h": 180,
+    "1h": 24 * 30,   # 약 1개월
+    "30m": 48 * 30,
+    "15m": 96 * 30,
+    "5m":  288 * 14,
+}
+
+def _apply_timeframe_defaults(args):
+    """--timeframe에 맞춰 episode_length를 자동 조정 (명시 지정 시 덮어씀)."""
+    if getattr(args, "crypto", False) and args.episode_length == 252:
+        auto = _EPISODE_BY_TIMEFRAME.get(args.timeframe, 252)
+        args.episode_length = auto
+        logger.info(f"episode_length 자동 설정: {auto} ({args.timeframe} 기준)")
 
 
 # ── 빠른 테스트 ────────────────────────────────────────
@@ -252,6 +331,13 @@ def parse_args():
     p.add_argument("--load",      default="best_sac",  help="로드할 체크포인트 이름")
     p.add_argument("--use-synthetic",  action="store_true", dest="use_synthetic")
     p.add_argument("--no-plot",        action="store_true", dest="no_plot")
+    # 암호화폐 옵션
+    p.add_argument("--crypto",         action="store_true", help="암호화폐 모드 (ccxt)")
+    p.add_argument("--exchange",       default="binance",   help="거래소 ID (ccxt)")
+    p.add_argument("--symbol",         default="BTC/USDT",  help="심볼 (예: ETH/USDT)")
+    p.add_argument("--timeframe",      default="1d",        help="봉 단위 (1d/4h/1h/15m)")
+    p.add_argument("--crypto-limit",   type=int, default=3000, dest="crypto_limit",
+                   help="수집할 최대 봉 수")
     # 튜닝 옵션
     p.add_argument("--trials",    type=int, default=30,  help="Optuna trial 수")
     p.add_argument("--timeout",   type=int, default=3600,help="튜닝 최대 시간(초)")

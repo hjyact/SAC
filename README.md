@@ -71,6 +71,12 @@ python main.py --mode train --ticker AAPL --steps 500000
 python main.py --mode train --reward sharpe
 python main.py --mode train --reward mixed
 
+# 암호화폐 학습 (ccxt 필요: pip install ccxt)
+python main.py --mode train --crypto                                    # BTC/USDT 일봉 (기본)
+python main.py --mode train --crypto --symbol ETH/USDT --timeframe 1h  # ETH 1시간봉
+python main.py --mode train --crypto --symbol BTC/USDT --timeframe 4h --steps 500000
+python main.py --mode train --crypto --exchange bybit --symbol BTC/USDT
+
 # 저장된 모델 평가
 python main.py --mode eval --load best_sac
 ```

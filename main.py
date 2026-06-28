@@ -148,7 +148,8 @@ def build_env_and_agent(
     env_cfg.window_size     = args.window_size
 
     train_env = TradingEnv(train_feat, train_price, env_cfg, mode="train")
-    eval_env  = TradingEnv(test_feat,  test_price,  env_cfg, mode="eval")
+    eval_env  = TradingEnv(test_feat,  test_price,  env_cfg, mode="eval",
+                           norm_stats=train_env.norm_stats)
 
     obs_dim    = train_env.observation_space.shape[0]
     action_dim = train_env.action_space.shape[0]

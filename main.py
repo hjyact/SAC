@@ -136,7 +136,9 @@ def _make_synthetic_data(n: int = 2000, seed: int = 42) -> pd.DataFrame:
 def _load_crypto_data(args) -> pd.DataFrame:
     """
     ccxt로 암호화폐 OHLCV 데이터를 로드합니다.
-    Binance 기준 최대 1,000봉 × 페이지네이션으로 전체 기간 수집.
+    - spot 마켓만 로드해 불필요한 derivatives 엔드포인트 타임아웃 방지
+    - 페이지네이션으로 최대 limit봉 수집
+    - 실패 시 대체 거래소(bybit → kraken) 순서로 fallback
     """
     try:
         import ccxt
@@ -144,14 +146,37 @@ def _load_crypto_data(args) -> pd.DataFrame:
         logger.error("ccxt 미설치: pip install ccxt")
         raise
 
-    exchange_cls = getattr(ccxt, args.exchange, None)
-    if exchange_cls is None:
-        raise ValueError(f"지원하지 않는 거래소: {args.exchange}")
-
-    exchange = exchange_cls({"enableRateLimit": True})
     symbol    = args.symbol
     timeframe = args.timeframe
     limit     = args.crypto_limit
+
+    # 시도할 거래소 순서: 지정 거래소 → fallback
+    fallback_exchanges = ["bybit", "okx", "kraken"]
+    candidates = [args.exchange] + [e for e in fallback_exchanges if e != args.exchange]
+
+    exchange = None
+    for ex_id in candidates:
+        exchange_cls = getattr(ccxt, ex_id, None)
+        if exchange_cls is None:
+            continue
+        try:
+            ex = exchange_cls({
+                "enableRateLimit": True,
+                "timeout":         30_000,          # 30초
+                "options": {"defaultType": "spot"},  # derivatives 마켓 로드 생략
+            })
+            # 마켓 로드 없이 OHLCV 직접 요청 (load_markets 우회)
+            test = ex.fetch_ohlcv(symbol, timeframe, limit=1)
+            if test:
+                exchange = ex
+                if ex_id != args.exchange:
+                    logger.warning(f"'{args.exchange}' 접속 실패 → '{ex_id}' 로 전환")
+                break
+        except Exception as e:
+            logger.warning(f"거래소 '{ex_id}' 실패: {type(e).__name__} — 다음 시도")
+
+    if exchange is None:
+        raise RuntimeError(f"모든 거래소 접속 실패: {candidates}")
 
     logger.info(f"암호화폐 데이터 수집: {exchange.id} | {symbol} | {timeframe} | {limit}봉")
 
@@ -162,12 +187,16 @@ def _load_crypto_data(args) -> pd.DataFrame:
 
     while len(all_ohlcv) < limit:
         fetch_n = min(batch, limit - len(all_ohlcv))
-        ohlcv   = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=fetch_n)
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=fetch_n)
+        except Exception as e:
+            logger.warning(f"페이지 수집 실패 ({type(e).__name__}), 현재까지 {len(all_ohlcv)}봉으로 진행")
+            break
         if not ohlcv:
             break
         all_ohlcv.extend(ohlcv)
-        since = ohlcv[-1][0] + 1   # 마지막 타임스탬프 다음부터
-        if len(ohlcv) < fetch_n:   # 더 이상 데이터 없음
+        since = ohlcv[-1][0] + 1
+        if len(ohlcv) < fetch_n:
             break
 
     if not all_ohlcv:
@@ -279,12 +308,13 @@ def run_eval_only(args):
 # ── 타임프레임별 episode_length 자동 설정 ─────────────
 
 _EPISODE_BY_TIMEFRAME = {
-    "1d": 252, "1D": 252,
-    "4h": 180, "8h": 180,
-    "1h": 24 * 30,   # 약 1개월
-    "30m": 48 * 30,
-    "15m": 96 * 30,
-    "5m":  288 * 14,
+    "1d":  252,        # 1년
+    "1D":  252,
+    "4h":  252 * 6,    # 1년 (4h봉 기준)
+    "1h":  252 * 24,   # 1년 (1h봉 기준) ≈ 6,048
+    "30m": 252 * 48,
+    "15m": 252 * 96,
+    "5m":  252 * 288,
 }
 
 def _apply_timeframe_defaults(args):
